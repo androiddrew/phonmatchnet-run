@@ -1,0 +1,9 @@
+phonmatchnet-run
+Copyright 2026 Drew Bednar and contributors
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+Built with go-phonmatchnet, which embeds naptrap's PhonMatchNet model and its
+companion encoders; their attribution and terms travel with that module (see
+its NOTICE and THIRD_PARTY.md). The detect command's interface follows
+naptrap's (https://github.com/androiddrew/naptrap, Apache-2.0).
+Third-party terms are listed in THIRD_PARTY.md.
