@@ -139,6 +139,39 @@ spikes at the cost of 250 ms latency. Similar-sounding phrases still fire: in
 our tests a synthesized "hey commuter" triggered "hey computer" with a score of
 0.994, which no threshold separates.
 
+### Reacting to detections
+
+Each detection is written as one line the moment it happens, so a shell loop
+can act on it. To play a sound when the wake word is heard:
+
+```bash
+arecord -q -f S16_LE -r 16000 -c 1 \
+  | phonmatchnet-run listen "hey computer" \
+  | while read -r detection; do aplay -q chime.wav & done
+```
+
+- **Keep the trailing `&`.** It plays the sound in the background. Without it
+  the loop waits for playback, `listen` blocks writing its next line, and the
+  capture tool drops audio while it waits.
+- **Other players:** `pw-play chime.wav` or `paplay chime.wav` on
+  PipeWire/PulseAudio, `afplay chime.wav` on macOS. The chime does not need
+  to be 16 kHz: the default playback device resamples it (a raw `hw:` ALSA
+  device may not).
+- **The microphone hears the chime.** A short tone is safe; spoken audio from
+  the speaker can mask the user or trigger a detection. Keep the sound shorter
+  than `--refractory` (default: the window length, 1.5 s), or raise
+  `--refractory` to cover it.
+- **With `--all`**, every window is printed; pass only detections to the loop:
+
+  ```bash
+  ... | phonmatchnet-run listen "hey computer" --all \
+      | grep --line-buffered '"detected":true' \
+      | while read -r detection; do aplay -q chime.wav & done
+  ```
+
+`$detection` holds the detection's JSON, so the loop can also log it or pass
+it on, e.g. `echo "$detection" >> detections.jsonl`.
+
 ## Limitations
 
 - **Keyword spotting only**: no voice activity detection, endpointing or
