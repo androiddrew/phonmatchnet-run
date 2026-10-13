@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-13
+
 ### Added
 
 - `detect AUDIO KEYWORD`: scores one 0.5–2 s mono 16 kHz 16-bit WAV clip (or `-` for stdin)
