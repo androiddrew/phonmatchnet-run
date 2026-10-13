@@ -35,12 +35,12 @@ phonmatchnet-run detect said-mister.wav "said mister"
   "score": 0.9978187183303515,
   "logit": 6.125658988952637,
   "threshold": 0.7149204015731812,
-  "target_far": 0.01,
   "accepted": true,
   "timings": {
     "embedding_seconds": 0.002619669,
     "detector_seconds": 0.000784665
-  }
+  },
+  "target_far": 0.01
 }
 ```
 
@@ -52,6 +52,7 @@ probability (0–1); `keyword` is the normalized text that was scored.
 |---|---|
 | `--ort` | ONNX Runtime library path or OS-loader name; default `$PHONMATCHNET_RUN_ORT_LIBRARY` |
 | `--far` | Calibrated operating point, `0.01` (default, strict) or `0.1` (sensitive) |
+| `--threshold` | Your own score threshold in [0, 1] instead of `--far`; `target_far` is then `null` |
 | `--threads` | ONNX Runtime intra-op threads per session (default 1) |
 | `--model-dir` | Use model files from a directory instead of the built-in ones (see go-phonmatchnet's ASSETS.md) |
 
@@ -79,7 +80,15 @@ or 10% per-clip false-accept rate. **These targets do not hold on other
 audio.** Similar-sounding phrases are often confused: a synthesized
 "hey commuter" scores 0.48 for the keyword "hey computer", rejected at `0.01`
 but accepted at `0.1`. For a real product, record positive and negative clips
-in your setting and choose your own threshold on `score`.
+in your setting, choose your own threshold on `score`, and pass it with
+`--threshold`:
+
+```bash
+phonmatchnet-run detect clip.wav "hey computer" --threshold 0.9
+```
+
+`accepted` and the exit status then follow `score >= threshold`, and
+`target_far` is `null` because no calibrated operating point was used.
 
 ## Limitations
 

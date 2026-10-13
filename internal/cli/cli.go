@@ -41,16 +41,18 @@ func NewCommand() *cobra.Command {
 	return root
 }
 
-// report is detect's JSON output.
+// report is detect's JSON output. TargetFAR shadows the embedded field so a
+// custom --threshold reports null instead of a calibrated operating point.
 type report struct {
 	Audio   string  `json:"audio"`
 	Seconds float64 `json:"seconds"`
 	phonmatchnet.Result
+	TargetFAR *float64 `json:"target_far"`
 }
 
 func detectCommand() *cobra.Command {
 	var library, modelDir string
-	var far float64
+	var far, threshold float64
 	var threads int
 	cmd := &cobra.Command{
 		Use:   "detect AUDIO KEYWORD",
@@ -60,16 +62,20 @@ print the result as JSON. AUDIO may be - to read standard input.
 
 Exit status: 0 if the keyword was accepted, 1 if it was rejected, 2 on error.
 The calibrated thresholds do not transfer reliably to other audio; for a real
-deployment, choose your own threshold on the printed score.
+deployment, choose your own threshold on the printed score and pass it with
+--threshold.
 ` + backendHelp,
 		Example: `  phonmatchnet-run detect clip.wav "hey computer"
   phonmatchnet-run detect clip.wav "hey computer" --far 0.1
+  phonmatchnet-run detect clip.wav "hey computer" --threshold 0.9
   ffmpeg -i in.m4a -ac 1 -ar 16000 -sample_fmt s16 -f wav - | phonmatchnet-run detect - "okay naptrap"`,
 		Args: cobra.ExactArgs(2),
 	}
 	f := cmd.Flags()
 	f.StringVar(&library, "ort", "", "ONNX Runtime library path or OS-loader name (or "+ORTEnv+")")
 	f.Float64Var(&far, "far", phonmatchnet.DefaultFAR, "Calibrated operating point: target false-accept rate, 0.01 or 0.1")
+	f.Float64Var(&threshold, "threshold", 0, "Custom score threshold in [0, 1] instead of a calibrated operating point")
+	cmd.MarkFlagsMutuallyExclusive("far", "threshold")
 	f.IntVar(&threads, "threads", 1, "ONNX Runtime intra-op threads per session")
 	f.StringVar(&modelDir, "model-dir", "", "Override the built-in models with a directory holding phonmatchnet/, google/ and g2p/")
 	cmd.RunE = func(cmd *cobra.Command, args []string) (err error) {
@@ -82,6 +88,10 @@ deployment, choose your own threshold on the printed score.
 		}
 		if threads < 1 {
 			return errors.New("--threads must be at least 1")
+		}
+		custom := cmd.Flags().Changed("threshold")
+		if custom && !(threshold >= 0 && threshold <= 1) {
+			return errors.New("--threshold must be within [0, 1]")
 		}
 		rate, samples, err := readClip(cmd, path)
 		if err != nil {
@@ -110,10 +120,16 @@ deployment, choose your own threshold on the printed score.
 			return err
 		}
 		out := report{Audio: path, Seconds: float64(len(samples)) / float64(rate), Result: result}
+		if custom {
+			out.Threshold = threshold
+			out.Accepted = result.Score >= threshold
+		} else {
+			out.TargetFAR = &result.TargetFAR
+		}
 		if err := encode(cmd.OutOrStdout(), out); err != nil {
 			return err
 		}
-		if !result.Accepted {
+		if !out.Accepted {
 			return ErrRejected
 		}
 		return nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,6 +39,8 @@ func TestInputErrors(t *testing.T) {
 		{"not WAV", []string{"detect", "cli.go", "said mister", "--ort", "not-a-runtime"}, "ffmpeg"},
 		{"digits", []string{"detect", clip, "route 66", "--ort", "not-a-runtime"}, "spell out numbers"},
 		{"threads", []string{"detect", clip, "said mister", "--ort", "not-a-runtime", "--threads", "0"}, "--threads"},
+		{"threshold range", []string{"detect", clip, "said mister", "--ort", "not-a-runtime", "--threshold", "1.5"}, "--threshold"},
+		{"threshold and far", []string{"detect", clip, "said mister", "--ort", "not-a-runtime", "--threshold", "0.5", "--far", "0.1"}, "none of the others"},
 		{"args", []string{"detect", clip}, "accepts 2 arg(s)"},
 	} {
 		out, _, err := execute(t, nil, c.args...)
@@ -69,6 +72,9 @@ func TestDetect(t *testing.T) {
 		// Confusable: rejected at FAR 0.01, accepted at 0.1 (see the README).
 		{"strict", nil, []string{"detect", "../../testdata/af_heart-hey-commuter.wav", "hey computer"}, false},
 		{"sensitive", nil, []string{"detect", "../../testdata/af_heart-hey-commuter.wav", "hey computer", "--far", "0.1"}, true},
+		// A custom threshold decides between the two calibrated points (score 0.48).
+		{"custom low", nil, []string{"detect", "../../testdata/af_heart-hey-commuter.wav", "hey computer", "--threshold", "0.4"}, true},
+		{"custom high", nil, []string{"detect", "../../testdata/said-mister.wav", "said mister", "--threshold", "0.999"}, false},
 	} {
 		out, _, err := execute(t, c.stdin, c.args...)
 		if c.accepted && err != nil || !c.accepted && !errors.Is(err, ErrRejected) {
@@ -81,8 +87,21 @@ func TestDetect(t *testing.T) {
 		if r.Accepted != c.accepted || r.Score < 0 || r.Score > 1 || r.Seconds <= 0 || r.Audio != c.args[1] {
 			t.Errorf("%s: %+v", c.name, r)
 		}
+		custom := strings.Contains(strings.Join(c.args, " "), "--threshold")
+		if custom != (r.TargetFAR == nil) || custom && r.Threshold != mustFloat(t, c.args[len(c.args)-1]) {
+			t.Errorf("%s: threshold %v, target_far %v", c.name, r.Threshold, r.TargetFAR)
+		}
 	}
 	if _, _, err := execute(t, nil, "detect", "../../testdata/said-mister.wav", "said mister", "--far", "0.05"); !errors.Is(err, phonmatchnet.ErrUnknownFAR) {
 		t.Errorf("uncalibrated FAR: %v", err)
 	}
+}
+
+func mustFloat(t *testing.T, s string) float64 {
+	t.Helper()
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }
