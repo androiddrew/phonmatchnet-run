@@ -31,29 +31,25 @@ The models are built in.`
 // NewCommand returns the root command.
 func NewCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use: "phonmatchnet-run", Short: "Text-defined keyword detection for short clips",
-		Long:         "Text-defined keyword detection for short clips with PhonMatchNet.\n" + backendHelp,
+		Use: "phonmatchnet-run", Short: "Text-defined keyword detection for clips and live audio",
+		Long:         "Text-defined keyword detection for clips and live audio with PhonMatchNet.\n" + backendHelp,
 		Version:      buildVersion(),
 		SilenceUsage: true, SilenceErrors: true,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(detectCommand())
+	root.AddCommand(detectCommand(), listenCommand())
 	return root
 }
 
-// report is detect's JSON output. TargetFAR shadows the embedded field so a
-// custom --threshold reports null instead of a calibrated operating point.
+// report is detect's JSON output.
 type report struct {
 	Audio   string  `json:"audio"`
 	Seconds float64 `json:"seconds"`
-	phonmatchnet.Result
-	TargetFAR *float64 `json:"target_far"`
+	decision
 }
 
 func detectCommand() *cobra.Command {
-	var library, modelDir string
-	var far, threshold float64
-	var threads int
+	var model modelOptions
 	cmd := &cobra.Command{
 		Use:   "detect AUDIO KEYWORD",
 		Short: "Score one 0.5-2 s mono 16 kHz 16-bit WAV clip against a keyword",
@@ -71,27 +67,11 @@ deployment, choose your own threshold on the printed score and pass it with
   ffmpeg -i in.m4a -ac 1 -ar 16000 -sample_fmt s16 -f wav - | phonmatchnet-run detect - "okay naptrap"`,
 		Args: cobra.ExactArgs(2),
 	}
-	f := cmd.Flags()
-	f.StringVar(&library, "ort", "", "ONNX Runtime library path or OS-loader name (or "+ORTEnv+")")
-	f.Float64Var(&far, "far", phonmatchnet.DefaultFAR, "Calibrated operating point: target false-accept rate, 0.01 or 0.1")
-	f.Float64Var(&threshold, "threshold", 0, "Custom score threshold in [0, 1] instead of a calibrated operating point")
-	cmd.MarkFlagsMutuallyExclusive("far", "threshold")
-	f.IntVar(&threads, "threads", 1, "ONNX Runtime intra-op threads per session")
-	f.StringVar(&modelDir, "model-dir", "", "Override the built-in models with a directory holding phonmatchnet/, google/ and g2p/")
+	model.register(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) (err error) {
 		path, text := args[0], args[1]
-		if library == "" {
-			library = os.Getenv(ORTEnv)
-		}
-		if library == "" {
-			return fmt.Errorf("provide --ort with a library path or loader name (e.g. libonnxruntime.so), or set %s", ORTEnv)
-		}
-		if threads < 1 {
-			return errors.New("--threads must be at least 1")
-		}
-		custom := cmd.Flags().Changed("threshold")
-		if custom && !(threshold >= 0 && threshold <= 1) {
-			return errors.New("--threshold must be within [0, 1]")
+		if err := model.validate(cmd); err != nil {
+			return err
 		}
 		rate, samples, err := readClip(cmd, path)
 		if err != nil {
@@ -104,7 +84,7 @@ deployment, choose your own threshold on the printed score and pass it with
 		if rate != phonmatchnet.SampleRate {
 			return fmt.Errorf("%s is %d Hz; convert it first, e.g. ffmpeg -i in.wav -ac 1 -ar 16000 -sample_fmt s16 out.wav", path, rate)
 		}
-		engine, err := phonmatchnet.New(phonmatchnet.Config{ORTLibrary: library, ModelDir: modelDir, Threads: threads})
+		engine, err := model.open()
 		if err != nil {
 			return err
 		}
@@ -114,18 +94,12 @@ deployment, choose your own threshold on the printed score and pass it with
 			return err
 		}
 		result, err := engine.Detect(cmd.Context(), phonmatchnet.Request{
-			Samples: samples, SampleRate: rate, Keyword: keyword, FAR: far,
+			Samples: samples, SampleRate: rate, Keyword: keyword, FAR: model.far,
 		})
 		if err != nil {
 			return err
 		}
-		out := report{Audio: path, Seconds: float64(len(samples)) / float64(rate), Result: result}
-		if custom {
-			out.Threshold = threshold
-			out.Accepted = result.Score >= threshold
-		} else {
-			out.TargetFAR = &result.TargetFAR
-		}
+		out := report{Audio: path, Seconds: float64(len(samples)) / float64(rate), decision: model.decide(result)}
 		if err := encode(cmd.OutOrStdout(), out); err != nil {
 			return err
 		}

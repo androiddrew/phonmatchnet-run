@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `listen KEYWORD`: watches a continuous 16 kHz mono stream (raw s16le or WAV, from standard
+  input or `--input`) with a sliding window and prints one JSON line per detection.
+- Debouncing with `--confirm` consecutive accepted windows and a `--refractory` period;
+  `--window`, `--hop`, and `--all` to print every window's score for tuning.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added

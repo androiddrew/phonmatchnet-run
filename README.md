@@ -2,13 +2,14 @@
 
 A command-line **text-defined keyword detector**. Give it a short audio clip
 and a keyword typed as text, and it prints the probability that the keyword was
-spoken. New wake words need no recordings or training.
+spoken; or pipe it a microphone stream and it prints each time the keyword is
+said. New wake words need no recordings or training.
 
 It runs naptrap's independently trained English
 [PhonMatchNet](https://huggingface.co/androiddrew/naptrap-phonmatchnet-en)
 through [go-phonmatchnet](https://github.com/androiddrew/go-phonmatchnet). The
 models are built into the binary; the only external requirement is an
-installed ONNX Runtime. The command follows `naptrap detect`.
+installed ONNX Runtime. `detect` follows `naptrap detect`.
 
 ## Install
 
@@ -90,10 +91,59 @@ phonmatchnet-run detect clip.wav "hey computer" --threshold 0.9
 `accepted` and the exit status then follow `score >= threshold`, and
 `target_far` is `null` because no calibrated operating point was used.
 
+## Listening to a microphone
+
+`listen` watches a continuous stream for a keyword and prints one JSON line per
+detection. It reads 16 kHz mono 16-bit audio from standard input, as raw s16le
+or WAV, so any capture tool can feed it:
+
+```bash
+# Linux (ALSA)
+arecord -q -f S16_LE -r 16000 -c 1 | phonmatchnet-run listen "hey computer"
+# Linux (PipeWire)
+pw-record --rate 16000 --channels 1 --format s16 - | phonmatchnet-run listen "hey computer"
+# macOS (list devices with: ffmpeg -f avfoundation -list_devices true -i "")
+ffmpeg -loglevel error -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - | phonmatchnet-run listen "hey computer"
+# Windows
+ffmpeg -loglevel error -f dshow -i audio="Microphone" -ac 1 -ar 16000 -f s16le - | phonmatchnet-run listen "hey computer"
+```
+
+```json
+{"time":"2026-10-13T11:40:02.51-04:00","start_seconds":19,"end_seconds":20.5,"detected":true,"keyword":"hey computer","score":0.994,"logit":5.12,"threshold":0.7149,"accepted":true,"timings":{…},"target_far":0.01}
+```
+
+`start_seconds` and `end_seconds` locate the detecting window in the stream;
+`time` is the wall clock when it was scored. A 1.5 s window is scored every
+250 ms, which takes about 2% of one CPU core. `listen` stops at the end of the
+input or on Ctrl-C, with exit status 0. `--input FILE` scans a recording
+instead of standard input. Input without a WAV header is read as raw s16le.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--window` | `1.5s` | Audio scored per window, 0.5–2 s |
+| `--hop` | `250ms` | Time between scored windows |
+| `--confirm` | `1` | Consecutive accepted windows needed for a detection |
+| `--refractory` | window length | After a detection, time before windows count toward the next one, so one utterance fires once |
+| `--all` | off | Print every scored window, with `detected` marking detections, for tuning |
+| `--input` | `-` | Read a file instead of standard input |
+
+`--far`, `--threshold`, `--threads`, `--model-dir` and `--ort` work as for
+`detect`.
+
+**Tuning.** A listener scores four windows a second, so false accepts add up
+much faster than with single clips; the calibrated false-accept rates do not
+describe false alarms per hour, which have not been measured. Run with
+`--all` while you speak the keyword and while you talk normally, then pick a
+`--threshold` between the two score ranges. `--confirm 2` ignores single-window
+spikes at the cost of 250 ms latency. Similar-sounding phrases still fire: in
+our tests a synthesized "hey commuter" triggered "hey computer" with a score of
+0.994, which no threshold separates.
+
 ## Limitations
 
-- **Single clips, not a streaming listener.** To watch a microphone, window the
-  audio yourself (e.g. 1.5 s windows every 0.25 s) and debounce repeated accepts.
+- **Keyword spotting only**: no voice activity detection, endpointing or
+  transcription. `listen` scores fixed windows; it does not find where the
+  keyword starts or ends.
 - **English only**, trained on read audiobook speech. Expect lower accuracy
   with noise, far-field microphones, accents or children.
 - **No speaker verification.** Anyone saying the keyword triggers it.

@@ -105,3 +105,133 @@ func mustFloat(t *testing.T, s string) float64 {
 	}
 	return v
 }
+
+func TestListenInputErrors(t *testing.T) {
+	t.Setenv(ORTEnv, "")
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no runtime", []string{"listen", "said mister"}, ORTEnv},
+		{"window", []string{"listen", "said mister", "--ort", "not-a-runtime", "--window", "3s"}, "--window"},
+		{"hop", []string{"listen", "said mister", "--ort", "not-a-runtime", "--hop", "5ms"}, "--hop"},
+		{"hop over window", []string{"listen", "said mister", "--ort", "not-a-runtime", "--hop", "2s", "--window", "1s"}, "--hop"},
+		{"confirm", []string{"listen", "said mister", "--ort", "not-a-runtime", "--confirm", "0"}, "confirm"},
+		{"refractory", []string{"listen", "said mister", "--ort", "not-a-runtime", "--refractory", "-1s"}, "refractory"},
+		{"digits", []string{"listen", "route 66", "--ort", "not-a-runtime"}, "spell out numbers"},
+		{"missing input", []string{"listen", "said mister", "--ort", "not-a-runtime", "--input", "nope.wav"}, "no such file"},
+	} {
+		out, _, err := execute(t, nil, c.args...)
+		if err == nil || !strings.Contains(err.Error(), c.want) || out != "" {
+			t.Errorf("%s: %v, output %q; want error containing %q", c.name, err, out, c.want)
+		}
+	}
+}
+
+// pcmOf concatenates WAV clips and silences (in samples) into one raw s16le stream.
+func pcmOf(t *testing.T, parts ...any) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	for _, part := range parts {
+		switch p := part.(type) {
+		case int:
+			out.Write(make([]byte, 2*p))
+		case string:
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out.Write(data[44:]) // the fixtures have plain 44-byte headers
+		}
+	}
+	return out.Bytes()
+}
+
+func TestListen(t *testing.T) {
+	library := os.Getenv("PHONMATCHNET_TEST_ORT")
+	if library == "" {
+		t.Skip("set PHONMATCHNET_TEST_ORT to an ONNX Runtime library for native tests")
+	}
+	t.Setenv(ORTEnv, library)
+	const second = 16000
+	said, commuter := "../../testdata/said-mister.wav", "../../testdata/af_heart-hey-commuter.wav"
+	// "said mister" twice, with silence and a different phrase between.
+	stream := pcmOf(t, second, said, second, commuter, second, said, second)
+	saidSeconds := float64(len(pcmOf(t, said))/2) / second
+	starts := []float64{1, 1 + saidSeconds + 1 + float64(len(pcmOf(t, commuter))/2)/second + 1}
+	type line struct {
+		Start, End float64
+		Detected   bool
+		Score      float64
+	}
+	parse := func(out string) (lines []line) {
+		for _, text := range strings.Split(strings.TrimSpace(out), "\n") {
+			var e event
+			if err := json.Unmarshal([]byte(text), &e); err != nil {
+				t.Fatalf("%v: %q", err, text)
+			}
+			lines = append(lines, line{e.StartSeconds, e.EndSeconds, e.Detected, e.Score})
+		}
+		return lines
+	}
+
+	out, errOut, err := execute(t, stream, "listen", "said mister")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, `listening for "said mister"`) {
+		t.Errorf("status: %q", errOut)
+	}
+	detections := parse(out)
+	if len(detections) != 2 {
+		t.Fatalf("detections %+v, want one per utterance", detections)
+	}
+	// The model may fire before the last few milliseconds of an utterance
+	// arrive, so each detection must contain most of its utterance.
+	for i, start := range starts {
+		end := start + saidSeconds
+		if d := detections[i]; !d.Detected || min(d.End, end)-max(d.Start, start) < 0.8*saidSeconds {
+			t.Errorf("detection %d %+v does not cover the utterance at %.2f-%.2f s", i, d, start, end)
+		}
+	}
+
+	// --all prints every window: one per 250 ms hop once 1.5 s have arrived.
+	out, _, err = execute(t, stream, "listen", "said mister", "--all", "--confirm", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windows, detected := parse(out), 0
+	total := float64(len(stream)/2) / second
+	if want := int((total-1.5)/0.25) + 1; len(windows) != want {
+		t.Errorf("%d windows, want %d", len(windows), want)
+	}
+	for _, w := range windows {
+		if w.Detected {
+			detected++
+		}
+	}
+	if detected != 2 {
+		t.Errorf("--confirm 2: %d detections", detected)
+	}
+
+	// A WAV stream from a file gives the same result as raw stdin.
+	wavStream := append([]byte(nil), mustRead(t, said)[:44]...)
+	wavStream = append(wavStream, stream...)
+	path := t.TempDir() + "/stream.wav"
+	if err := os.WriteFile(path, wavStream, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err = execute(t, nil, "listen", "said mister", "--input", path); err != nil || len(parse(out)) != 2 {
+		t.Errorf("WAV input: %v %q", err, out)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}

@@ -1,7 +1,9 @@
-// Package wav reads the clips phonmatchnet-run scores: mono 16-bit PCM WAV.
+// Package wav reads mono 16-bit PCM audio: whole WAV clips for detect, and
+// raw or WAV streams for listen.
 package wav
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -72,4 +74,86 @@ func Decode(r io.Reader) (rate int, samples []float32, err error) {
 		}
 	}
 	return 0, nil, fmt.Errorf("no data chunk: %w", ErrFormat)
+}
+
+// Stream returns the 16-bit little-endian PCM in r for continuous input. A
+// WAV stream (starting with RIFF) must be mono 16-bit PCM at rate; its header
+// is consumed and the data chunk's size is ignored, since capture tools write
+// a placeholder. Anything else is passed through as raw s16le. The header is
+// read on the first Read, so Stream never blocks and format errors surface
+// as read errors.
+func Stream(r io.Reader, rate int) io.Reader { return &stream{source: r, rate: rate} }
+
+type stream struct {
+	source io.Reader
+	rate   int
+	pcm    io.Reader
+	err    error
+}
+
+func (s *stream) Read(p []byte) (int, error) {
+	if s.pcm == nil && s.err == nil {
+		s.pcm, s.err = openStream(s.source, s.rate)
+	}
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.pcm.Read(p)
+}
+
+func openStream(r io.Reader, rate int) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	magic, err := br.Peek(4)
+	if err != nil && len(magic) == 0 {
+		if err == io.EOF {
+			return br, nil
+		}
+		return nil, err
+	}
+	if string(magic) != "RIFF" {
+		return br, nil
+	}
+	header := make([]byte, 12)
+	if _, err := io.ReadFull(br, header); err != nil || string(header[8:12]) != "WAVE" {
+		return nil, fmt.Errorf("not a WAV stream: %w", ErrFormat)
+	}
+	seenFormat := false
+	for {
+		chunk := make([]byte, 8)
+		if _, err := io.ReadFull(br, chunk); err != nil {
+			return nil, fmt.Errorf("no data chunk: %w", ErrFormat)
+		}
+		id, size := string(chunk[:4]), int64(binary.LittleEndian.Uint32(chunk[4:]))
+		if id == "data" {
+			if !seenFormat {
+				return nil, fmt.Errorf("data before fmt chunk: %w", ErrFormat)
+			}
+			return br, nil
+		}
+		if id != "fmt " {
+			// Skip metadata, word-aligned.
+			if _, err := io.CopyN(io.Discard, br, size+size%2); err != nil {
+				return nil, fmt.Errorf("truncated %q chunk: %w", id, ErrFormat)
+			}
+			continue
+		}
+		if size < 16 || size > 1024 {
+			return nil, fmt.Errorf("bad fmt chunk: %w", ErrFormat)
+		}
+		body := make([]byte, size+size%2)
+		if _, err := io.ReadFull(br, body); err != nil {
+			return nil, fmt.Errorf("truncated fmt chunk: %w", ErrFormat)
+		}
+		tag := binary.LittleEndian.Uint16(body[0:])
+		if tag == formatExtensible && size >= 26 {
+			tag = binary.LittleEndian.Uint16(body[24:])
+		}
+		if tag != formatPCM || binary.LittleEndian.Uint16(body[2:]) != 1 || binary.LittleEndian.Uint16(body[14:]) != 16 {
+			return nil, ErrFormat
+		}
+		if got := int(binary.LittleEndian.Uint32(body[4:])); got != rate {
+			return nil, fmt.Errorf("WAV stream is %d Hz, expected %d: %w", got, rate, ErrFormat)
+		}
+		seenFormat = true
+	}
 }
